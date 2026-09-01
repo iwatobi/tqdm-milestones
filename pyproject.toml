@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tqdm-milestones"
+version = "1.0.0"
+description = "Deterministic progress milestones for terminals, logs, and monitoring systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "iwatobi" }]
+keywords = ["tqdm", "progress", "logging", "monitoring", "milestones", "tty"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = ["tqdm>=4.64"]
+
+[project.urls]
+Repository = "https://github.com/iwatobi/tqdm-milestones"
+Issues = "https://github.com/iwatobi/tqdm-milestones/issues"
+Changelog = "https://github.com/iwatobi/tqdm-milestones/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["coverage[toml]>=7.6", "pyright>=1.1.405", "pytest>=8", "ruff>=0.12"]
+publish = ["build>=1.2", "twine>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tqdm_milestones"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["tqdm_milestones"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
