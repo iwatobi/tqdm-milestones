@@ -54,6 +54,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   verify-install:
     needs: publish
@@ -68,7 +69,7 @@ jobs:
           python-version: "3.10"
       - name: Install and import from TestPyPI
         run: |
-          package_version=$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          package_version=$(uv version --short)
           uv venv --python 3.10 --seed .test-venv
           .test-venv/bin/pip install --index-url https://pypi.org/simple/ "tqdm>=4.64"
           for attempt in 1 2 3 4 5 6; do
