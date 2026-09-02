@@ -32,13 +32,52 @@ jobs:
       - name: Check lockfile
         run: uv lock --check
       - name: Lint
-        run: uv run --extra test ruff check .
+        run: uv run --extra test ruff check --no-cache .
+      - name: Format check
+        run: uv run --extra test ruff format --no-cache --check .
       - name: Type check
-        run: uv run --extra test pyright src tests
+        run: uv run --extra test ty check --error-on-warning src tests scripts
+      - name: Audit locked development dependencies
+        if: matrix.python-version == '3.14'
+        run: uv run --extra test --extra publish pip-audit
       - name: Test with branch coverage
         run: uv run --extra test coverage run -m pytest
       - name: Enforce 100% coverage
         run: uv run --extra test coverage report
+      - name: Enforce 100% coverage for each implementation module
+        if: matrix.python-version == '3.14'
+        run: uv run --extra test python scripts/check_module_coverage.py
+
+  minimum-dependency:
+    name: Minimum tqdm on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create minimum-dependency environment
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          uv venv --python "$PYTHON_VERSION" .minimum-venv
+          uv pip install --python .minimum-venv/bin/python "tqdm==4.66.3" "pytest>=8"
+          uv pip install --python .minimum-venv/bin/python --no-deps .
+      - name: Test with the minimum supported tqdm
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          .minimum-venv/bin/python -m pytest
+          uv pip check --python .minimum-venv/bin/python
+          uv run --extra test pip-audit \
+            --path ".minimum-venv/lib/python${PYTHON_VERSION}/site-packages"
 
   package:
     name: Build and install distributions
@@ -67,3 +106,19 @@ jobs:
           uv venv --python 3.14 .sdist-venv
           uv pip install --python .sdist-venv/bin/python dist/*.tar.gz
           .sdist-venv/bin/python -c "from tqdm_milestones import ProgressReporter, tqdm_iter"
+
+  gate:
+    name: CI success
+    if: always()
+    needs: [test, minimum-dependency, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          MINIMUM_DEPENDENCY_RESULT: ${{ needs.minimum-dependency.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$TEST_RESULT" = "success"
+          test "$MINIMUM_DEPENDENCY_RESULT" = "success"
+          test "$PACKAGE_RESULT" = "success"

@@ -69,18 +69,34 @@ jobs:
             exit 1
           fi
           echo "version=$release_version" >> "$GITHUB_OUTPUT"
-      - name: Lint and type check
+      - name: Lint, format, and type check
         run: |
-          uv run --extra test ruff check .
-          uv run --extra test pyright src tests
+          uv run --extra test ruff check --no-cache .
+          uv run --extra test ruff format --no-cache --check .
+          uv run --extra test ty check --error-on-warning src tests scripts
+      - name: Audit locked development dependencies
+        run: uv run --extra test --extra publish pip-audit
       - name: Test with 100% branch coverage
         run: |
           uv run --extra test coverage run -m pytest
           uv run --extra test coverage report
+          uv run --extra test python scripts/check_module_coverage.py
       - name: Test every supported Python version
         run: |
           for python_version in 3.10 3.11 3.12 3.13 3.14; do
             uv run --isolated --python "$python_version" --extra test pytest -q
+          done
+      - name: Test the minimum supported tqdm
+        run: |
+          for python_version in 3.10 3.14; do
+            minimum_env=".minimum-${python_version}-venv"
+            uv venv --python "$python_version" "$minimum_env"
+            uv pip install --python "$minimum_env/bin/python" "tqdm==4.66.3" "pytest>=8"
+            uv pip install --python "$minimum_env/bin/python" --no-deps .
+            "$minimum_env/bin/python" -m pytest
+            uv pip check --python "$minimum_env/bin/python"
+            uv run --extra test pip-audit \
+              --path "$minimum_env/lib/python${python_version}/site-packages"
           done
       - name: Build distributions
         run: uv build
@@ -111,6 +127,8 @@ jobs:
           path: dist/
       - name: Publish distributions with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: ${{ github.run_attempt != '1' }}
 
   verify:
     name: Verify production installation
@@ -159,8 +177,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
         run: |
-          gh release create "v${RELEASE_VERSION}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "tqdm-milestones ${RELEASE_VERSION}" \
-            --generate-notes
+          if gh release view "v${RELEASE_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            tag_commit=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/v${RELEASE_VERSION}" \
+              --jq .sha)
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "Tag v${RELEASE_VERSION} does not point to $GITHUB_SHA" >&2
+              exit 1
+            fi
+            echo "GitHub Release v${RELEASE_VERSION} already exists"
+          else
+            tag_commit=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/v${RELEASE_VERSION}" \
+              --jq .sha 2>/dev/null || true)
+            if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "Tag v${RELEASE_VERSION} does not point to $GITHUB_SHA" >&2
+              exit 1
+            fi
+            gh release create "v${RELEASE_VERSION}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "tqdm-milestones ${RELEASE_VERSION}" \
+              --generate-notes
+          fi

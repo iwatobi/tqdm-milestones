@@ -1,7 +1,8 @@
 # Contributing
 
-Development is based on the `develop` branch. The `main` branch always
-represents the latest production release.
+Development is based on the `develop` branch. The `main` branch is the
+production release branch and accepts changes only through release pull
+requests from `develop`.
 
 ## Development workflow
 
@@ -14,10 +15,13 @@ represents the latest production release.
 git switch develop
 git pull --ff-only
 uv sync --extra test --extra publish
-uv run --extra test ruff check .
-uv run --extra test pyright src tests
+uv run --extra test ruff check --no-cache .
+uv run --extra test ruff format --no-cache --check .
+uv run --extra test ty check --error-on-warning src tests scripts
+uv run --extra test --extra publish pip-audit
 uv run --extra test coverage run -m pytest
 uv run --extra test coverage report
+uv run --extra test python scripts/check_module_coverage.py
 ```
 
 ## Release workflow
@@ -40,5 +44,17 @@ then builds and tests the stable version on every supported Python version,
 publishes it to PyPI, verifies a clean installation from PyPI, and creates the
 matching `vX.Y.Z` tag and GitHub Release.
 
+The `main` ruleset requires the `CI success` and `TestPyPI release gate` checks,
+requires a pull request, and blocks branch deletion and force pushes. Do not
+bypass these release safeguards.
+
 Do not create production tags or GitHub Releases manually. PyPI and TestPyPI
 distribution filenames are immutable and cannot be reused after deletion.
+
+If an upload succeeds only partially or a publishing job fails after uploading,
+rerun only the failed jobs in the same GitHub Actions run. The workflow reuses
+the original distributions and enables duplicate skipping only on a retried
+attempt, so filenames already accepted by the index are skipped while missing
+files are uploaded. It then continues with installation verification. Do not
+rerun the entire production workflow: its build preflight intentionally rejects
+a stable version that already exists on PyPI.
