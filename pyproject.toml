@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tqdm-milestones"
-version = "1.0.0"
+version = "2.0.0"
 description = "Deterministic progress milestones for terminals, logs, and monitoring systems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["tqdm>=4.64"]
+dependencies = ["tqdm>=4.66.3"]
 
 [project.urls]
 Repository = "https://github.com/iwatobi/tqdm-milestones"
@@ -31,14 +31,20 @@ Issues = "https://github.com/iwatobi/tqdm-milestones/issues"
 Changelog = "https://github.com/iwatobi/tqdm-milestones/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["coverage[toml]>=7.6", "pyright>=1.1.405", "pytest>=8", "ruff>=0.12"]
+test = [
+  "coverage[toml]>=7.6",
+  "pip-audit>=2.10.1",
+  "pytest>=8",
+  "ruff>=0.12",
+  "ty>=0.0.77",
+]
 publish = ["build>=1.2", "twine>=6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tqdm_milestones"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --strict-markers -p no:cacheprovider"
 testpaths = ["tests"]
 
 [tool.coverage.run]
@@ -53,12 +59,21 @@ skip_covered = false
 [tool.ruff]
 target-version = "py310"
 line-length = 99
+indent-width = 4
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "D", "ANN", "Q", "PLC0415"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["D"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.10"

@@ -1,18 +1,29 @@
-name: Publish to TestPyPI
+name: TestPyPI release candidate
 
 on:
-  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: testpypi-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build release candidate
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    outputs:
+      candidate-version: ${{ steps.candidate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -20,14 +31,66 @@ jobs:
           enable-cache: false
       - name: Check lockfile
         run: uv lock --check
-      - name: Lint and type check
+      - name: Validate release pull request
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          uv run --extra test ruff check .
-          uv run --extra test pyright src tests
+          test "$PR_HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$PR_HEAD_REF" = "develop"
+          release_version=$(uv version --short)
+          if [[ ! "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release version must be a stable semantic version: $release_version" >&2
+            exit 1
+          fi
+          if ! grep -Eq "^## ${release_version} - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md has no release entry for $release_version" >&2
+            exit 1
+          fi
+          latest_version=$(curl --fail --location --silent --show-error \
+            "https://pypi.org/pypi/tqdm-milestones/json" \
+            | uv run --extra publish python -c \
+              'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          uv run --extra publish python - "$release_version" "$latest_version" <<'PY'
+          import sys
+
+          from packaging.version import Version
+
+          if Version(sys.argv[1]) <= Version(sys.argv[2]):
+              raise SystemExit(
+                  f"Release version {sys.argv[1]} must be newer than PyPI version {sys.argv[2]}"
+              )
+          PY
+          response_code=$(curl --location --silent --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/tqdm-milestones/${release_version}/json")
+          if [ "$response_code" = "200" ]; then
+            echo "tqdm-milestones $release_version already exists on PyPI" >&2
+            exit 1
+          fi
+          if [ "$response_code" != "404" ]; then
+            echo "Unexpected response from PyPI: HTTP $response_code" >&2
+            exit 1
+          fi
+      - name: Lint, format, and type check
+        run: |
+          uv run --extra test ruff check --no-cache .
+          uv run --extra test ruff format --no-cache --check .
+          uv run --extra test ty check --error-on-warning src tests scripts
+      - name: Audit locked development dependencies
+        run: uv run --extra test --extra publish pip-audit
       - name: Test with 100% branch coverage
         run: |
           uv run --extra test coverage run -m pytest
           uv run --extra test coverage report
+          uv run --extra test python scripts/check_module_coverage.py
+      - name: Create unique candidate version
+        id: candidate
+        run: |
+          release_version=$(uv version --short)
+          candidate_serial=$((GITHUB_RUN_ID * 1000 + GITHUB_RUN_ATTEMPT))
+          candidate_version="${release_version}.dev${candidate_serial}"
+          uv version --frozen "$candidate_version"
+          echo "version=$candidate_version" >> "$GITHUB_OUTPUT"
       - name: Build distributions
         run: uv build
       - name: Check package metadata
@@ -35,52 +98,81 @@ jobs:
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: python-package-distributions
+          name: testpypi-distributions-${{ steps.candidate.outputs.version }}
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
+    name: Publish release candidate to TestPyPI
     needs: build
     runs-on: ubuntu-latest
-    environment: testpypi
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/tqdm-milestones
     permissions:
-      id-token: write
+      id-token: write # Required for TestPyPI Trusted Publishing.
     steps:
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: python-package-distributions
+          name: testpypi-distributions-${{ needs.build.outputs.candidate-version }}
           path: dist/
       - name: Publish distributions with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+          skip-existing: ${{ github.run_attempt != '1' }}
 
-  verify-install:
-    needs: publish
+  verify:
+    name: Verify TestPyPI installation
+    needs: [build, publish]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: "3.10"
+          enable-cache: false
       - name: Install and import from TestPyPI
+        env:
+          CANDIDATE_VERSION: ${{ needs.build.outputs.candidate-version }}
         run: |
-          package_version=$(uv version --short)
           uv venv --python 3.10 --seed .test-venv
-          .test-venv/bin/pip install --index-url https://pypi.org/simple/ "tqdm>=4.64"
-          for attempt in 1 2 3 4 5 6; do
+          .test-venv/bin/pip install --index-url https://pypi.org/simple/ "tqdm>=4.66.3"
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if .test-venv/bin/pip install --no-cache-dir --no-deps \
               --index-url https://test.pypi.org/simple/ \
-              "tqdm-milestones==$package_version"; then
+              "tqdm-milestones==$CANDIDATE_VERSION"; then
               break
             fi
-            if [ "$attempt" = 6 ]; then
+            if [ "$attempt" = "12" ]; then
               exit 1
             fi
             sleep 10
           done
-          .test-venv/bin/python -c "from tqdm_milestones import ProgressEvent, ProgressReporter, tqdm_iter"
+          .test-venv/bin/pip check
+          .test-venv/bin/python - "$CANDIDATE_VERSION" <<'PY'
+          import sys
+          from importlib.metadata import version
+
+          from tqdm_milestones import ProgressEvent, ProgressMode, ProgressReporter, tqdm_iter
+
+          assert version("tqdm-milestones") == sys.argv[1]
+          PY
+
+  gate:
+    name: TestPyPI release gate
+    if: always()
+    needs: [build, publish, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the complete TestPyPI round-trip to succeed
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          test "$BUILD_RESULT" = "success"
+          test "$PUBLISH_RESULT" = "success"
+          test "$VERIFY_RESULT" = "success"

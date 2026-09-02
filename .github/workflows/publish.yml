@@ -1,15 +1,22 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build production release
     runs-on: ubuntu-latest
+    outputs:
+      release-version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,22 +28,75 @@ jobs:
           enable-cache: false
       - name: Check lockfile
         run: uv lock --check
-      - name: Verify release tag matches package version
+      - name: Validate release version
+        id: release
         run: |
-          package_version=$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          test "$GITHUB_REF_NAME" = "v$package_version"
-      - name: Lint and type check
+          release_version=$(uv version --short)
+          if [[ ! "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release version must be a stable semantic version: $release_version" >&2
+            exit 1
+          fi
+          if ! grep -Eq "^## ${release_version} - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md has no release entry for $release_version" >&2
+            exit 1
+          fi
+          latest_version=$(curl --fail --location --silent --show-error \
+            "https://pypi.org/pypi/tqdm-milestones/json" \
+            | uv run --extra publish python -c \
+              'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          uv run --extra publish python - "$release_version" "$latest_version" <<'PY'
+          import sys
+
+          from packaging.version import Version
+
+          if Version(sys.argv[1]) <= Version(sys.argv[2]):
+              raise SystemExit(
+                  f"Release version {sys.argv[1]} must be newer than PyPI version {sys.argv[2]}"
+              )
+          PY
+          response_code=$(curl --location --silent --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/tqdm-milestones/${release_version}/json")
+          if [ "$response_code" = "200" ]; then
+            echo "tqdm-milestones $release_version already exists on PyPI" >&2
+            exit 1
+          fi
+          if [ "$response_code" != "404" ]; then
+            echo "Unexpected response from PyPI: HTTP $response_code" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${release_version}" >/dev/null 2>&1; then
+            echo "Tag v${release_version} already exists" >&2
+            exit 1
+          fi
+          echo "version=$release_version" >> "$GITHUB_OUTPUT"
+      - name: Lint, format, and type check
         run: |
-          uv run --extra test ruff check .
-          uv run --extra test pyright src tests
+          uv run --extra test ruff check --no-cache .
+          uv run --extra test ruff format --no-cache --check .
+          uv run --extra test ty check --error-on-warning src tests scripts
+      - name: Audit locked development dependencies
+        run: uv run --extra test --extra publish pip-audit
       - name: Test with 100% branch coverage
         run: |
           uv run --extra test coverage run -m pytest
           uv run --extra test coverage report
+          uv run --extra test python scripts/check_module_coverage.py
       - name: Test every supported Python version
         run: |
           for python_version in 3.10 3.11 3.12 3.13 3.14; do
             uv run --isolated --python "$python_version" --extra test pytest -q
+          done
+      - name: Test the minimum supported tqdm
+        run: |
+          for python_version in 3.10 3.14; do
+            minimum_env=".minimum-${python_version}-venv"
+            uv venv --python "$python_version" "$minimum_env"
+            uv pip install --python "$minimum_env/bin/python" "tqdm==4.66.3" "pytest>=8"
+            uv pip install --python "$minimum_env/bin/python" --no-deps .
+            "$minimum_env/bin/python" -m pytest
+            uv pip check --python "$minimum_env/bin/python"
+            uv run --extra test pip-audit \
+              --path "$minimum_env/lib/python${python_version}/site-packages"
           done
       - name: Build distributions
         run: uv build
@@ -45,20 +105,99 @@ jobs:
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: python-package-distributions
+          name: production-distributions-${{ github.sha }}
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
+    name: Publish production release to PyPI
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tqdm-milestones/${{ needs.build.outputs.release-version }}/
     permissions:
-      id-token: write
+      id-token: write # Required for PyPI Trusted Publishing.
     steps:
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: python-package-distributions
+          name: production-distributions-${{ github.sha }}
           path: dist/
       - name: Publish distributions with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: ${{ github.run_attempt != '1' }}
+
+  verify:
+    name: Verify production installation
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.10"
+          enable-cache: false
+      - name: Install and import from PyPI
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+        run: |
+          uv venv --python 3.10 --seed .release-venv
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if .release-venv/bin/pip install --no-cache-dir \
+              "tqdm-milestones==$RELEASE_VERSION"; then
+              break
+            fi
+            if [ "$attempt" = "12" ]; then
+              exit 1
+            fi
+            sleep 10
+          done
+          .release-venv/bin/pip check
+          .release-venv/bin/python - "$RELEASE_VERSION" <<'PY'
+          import sys
+          from importlib.metadata import version
+
+          from tqdm_milestones import ProgressEvent, ProgressMode, ProgressReporter, tqdm_iter
+
+          assert version("tqdm-milestones") == sys.argv[1]
+          PY
+
+  release:
+    name: Create GitHub release
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create the release and its tag.
+    steps:
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+        run: |
+          if gh release view "v${RELEASE_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            tag_commit=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/v${RELEASE_VERSION}" \
+              --jq .sha)
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "Tag v${RELEASE_VERSION} does not point to $GITHUB_SHA" >&2
+              exit 1
+            fi
+            echo "GitHub Release v${RELEASE_VERSION} already exists"
+          else
+            tag_commit=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/v${RELEASE_VERSION}" \
+              --jq .sha 2>/dev/null || true)
+            if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "Tag v${RELEASE_VERSION} does not point to $GITHUB_SHA" >&2
+              exit 1
+            fi
+            gh release create "v${RELEASE_VERSION}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "tqdm-milestones ${RELEASE_VERSION}" \
+              --generate-notes
+          fi
