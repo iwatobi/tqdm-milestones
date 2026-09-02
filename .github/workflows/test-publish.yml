@@ -71,18 +71,10 @@ jobs:
             echo "Unexpected response from PyPI: HTTP $response_code" >&2
             exit 1
           fi
-      - name: Lint, format, and type check
-        run: |
-          uv run --extra test ruff check --no-cache .
-          uv run --extra test ruff format --no-cache --check .
-          uv run --extra test ty check --error-on-warning src tests scripts
-      - name: Audit locked development dependencies
-        run: uv run --extra test --extra publish pip-audit
-      - name: Test with 100% branch coverage
-        run: |
-          uv run --extra test coverage run -m pytest
-          uv run --extra test coverage report
-          uv run --extra test python scripts/check_module_coverage.py
+      - name: Rehearse the production build # zizmor: ignore[self-repository] actionlint lacks $/ support.
+        uses: ./.github/actions/build-release
+        with:
+          output-dir: ${{ runner.temp }}/production-rehearsal-dist
       - name: Create unique candidate version
         id: candidate
         run: |

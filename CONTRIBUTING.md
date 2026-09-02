@@ -33,7 +33,8 @@ to `CHANGELOG.md`. Each production version must be new on PyPI.
 Open a pull request from `develop` to `main`. The release-candidate workflow:
 
 1. accepts only the repository's `develop` branch as the pull-request source;
-2. runs linting, type checking, and the full-coverage test suite;
+2. rehearses the same checks and stable-distribution build used by the
+   production workflow;
 3. changes the version only inside the runner to a unique `.devN` version;
 4. publishes wheel and source distributions to TestPyPI; and
 5. installs the candidate from TestPyPI under Python 3.10 and imports the public

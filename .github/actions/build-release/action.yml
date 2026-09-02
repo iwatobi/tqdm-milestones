@@ -1,0 +1,55 @@
+name: Build release distributions
+description: Run the shared production release checks and build distributions.
+
+inputs:
+  output-dir:
+    description: Directory that receives the wheel and source distribution.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Lint, format, and type check
+      shell: bash
+      run: |
+        uv run --extra test ruff check --no-cache .
+        uv run --extra test ruff format --no-cache --check .
+        uv run --extra test ty check --error-on-warning src tests scripts
+    - name: Audit locked development dependencies
+      shell: bash
+      run: uv run --extra test --extra publish pip-audit
+    - name: Test with 100% branch coverage
+      shell: bash
+      run: |
+        uv run --extra test coverage run -m pytest
+        uv run --extra test coverage report
+        uv run --extra test python scripts/check_module_coverage.py
+    - name: Test every supported Python version
+      shell: bash
+      run: |
+        for python_version in 3.10 3.11 3.12 3.13 3.14; do
+          uv run --isolated --python "$python_version" --extra test pytest -q
+        done
+    - name: Test the minimum supported tqdm
+      shell: bash
+      run: |
+        for python_version in 3.10 3.14; do
+          minimum_env="${RUNNER_TEMP}/tqdm-milestones-minimum-${python_version}-venv"
+          uv venv --python "$python_version" "$minimum_env"
+          uv pip install --python "$minimum_env/bin/python" "tqdm==4.66.3" "pytest>=8"
+          uv pip install --python "$minimum_env/bin/python" --no-deps .
+          "$minimum_env/bin/python" -m pytest
+          uv pip check --python "$minimum_env/bin/python"
+          uv run --extra test pip-audit \
+            --path "$minimum_env/lib/python${python_version}/site-packages"
+        done
+    - name: Build distributions
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: uv build --out-dir "$OUTPUT_DIR"
+    - name: Check package metadata
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: uv run --extra publish twine check --strict "$OUTPUT_DIR"/*
