@@ -160,28 +160,32 @@ context after the reporter is closed raises `RuntimeError`.
 ## Development
 
 ```console
-python -m pip install -e ".[test,publish]"
-python -m coverage run -m pytest
-python -m coverage report
-python -m build
-python -m twine check dist/*
+git switch develop
+uv sync --extra test --extra publish
+uv run --extra test coverage run -m pytest
+uv run --extra test coverage report
+uv build
+uv run --extra publish twine check --strict dist/*
 ```
 
 The test suite requires 100% statement and branch coverage.
 
-See the [changelog](https://github.com/iwatobi/tqdm-milestones/blob/main/CHANGELOG.md)
-and [issue tracker](https://github.com/iwatobi/tqdm-milestones/issues).
+See the [contribution and release workflow](https://github.com/iwatobi/tqdm-milestones/blob/develop/CONTRIBUTING.md),
+[changelog](https://github.com/iwatobi/tqdm-milestones/blob/main/CHANGELOG.md), and
+[issue tracker](https://github.com/iwatobi/tqdm-milestones/issues).
 
 ## Publishing
 
 The GitHub workflows use PyPI Trusted Publishing and do not require long-lived
-API tokens. Configure `testpypi` and `pypi` GitHub environments and matching
-Trusted Publishers. Run the TestPyPI workflow manually first; publishing a
-GitHub release triggers the production PyPI workflow.
+API tokens. Development is integrated on `develop`. A release pull request from
+`develop` to `main` publishes a uniquely versioned candidate to TestPyPI and
+verifies its installation. Merging a successful release pull request publishes
+the stable version to PyPI, verifies it, and creates the matching tag and GitHub
+Release.
 
-Use each version only once on TestPyPI because uploaded distribution versions
-are immutable. Production releases must use a tag matching the project version,
-for example `v1.0.0`; the workflow rejects mismatched tags before upload.
+Both indexes keep distribution filenames immutable. Never reuse a version, even
+after deleting a release. See [CONTRIBUTING.md](https://github.com/iwatobi/tqdm-milestones/blob/develop/CONTRIBUTING.md)
+for the complete release procedure.
 
 ## License
 
